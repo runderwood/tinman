@@ -1,18 +1,20 @@
 <?php
 define('CLI', isset($argv));
 if(CLI && !isset($argv[1])) die("Usage: tm <uri> [<method>] <- [<payload>]\n");
-define('HTTPBASE', '/tm/');
+define('HTTPBASE', '/r/tm/');
 define('STORE', '/home/reed/temp/tinmanstore/');
 define('HPRE', 'h_');
 define('AUTHREALM', 'tinman');
+$global_file_cache = array(); // per-request file contents cache.
 $routes = array(
     'about' => 'about',
     'store\/.*' => 'store'
 );
+//TODO: dir manifests w/ perms.
 $users = array(
     'admin' => array(
         'salt' => 'saysthetinman',
-        'password' => '5664bd1a971eb97010dcb2f2b98302e7',
+        'password' => '06279822ffa578d8d070b1affd8544f3',
         'roles' => array('admin')
     )
 );
@@ -57,7 +59,7 @@ function auth_user() {
 }
 
 function condition_uri($uri) {
-    $uri = str_replace(HTTPBASE, '', '/'.ltrim($uri, '/'));
+    $uri = preg_replace('/^'.str_replace('/', '\/', HTTPBASE).'/', '', '/'.ltrim($uri, '/'));
     return trim($uri, '/').'/';
 }
 
@@ -70,8 +72,9 @@ function valid_uri($uri) {
     global $routes;
     $h = false;
     foreach($routes as $p => $h_) {
-        if(preg_match('/^'.$p.'\/$/', $uri)) {
+        if(preg_match('/^'.$p.'\/?$/', $uri)) {
             $h = $h_;
+            break;
         }
     }
     return $h;
@@ -103,6 +106,40 @@ function call_handler($handler, $method='get') {
         $result = call_user_func(handler_name($handler, $method));
     }
     return $result;
+}
+
+function req_header($hn) {
+    $h = 'HTTP_';
+    $h .= strtoupper(preg_replace('/\W+/', '_', $hn));
+    return isset($_SERVER[$h]) ? $_SERVER[$h] : false;
+}
+
+function etag_get_deep($s) {
+    return md5($s.'TOMCLANCY4EVER');
+}
+
+function etag($s) {
+    return etag_get_deep($s);
+}
+
+function etag_file($f) {
+    return etag_get_deep(file_get_contents($f));
+}
+
+function etag_match_file($s, $f) {
+    return etag_get_deep($s) === etag_file($f);
+}
+
+function file_load($p, $c=true) {
+    global $global_file_cache;
+    $f = false;
+    if(isset($global_file_cache[$p])) {
+        $f = $global_file_cache[$p];
+    } elseif(is_readable($p)) {
+        $f = file_get_contents($p);
+        if($c) $global_file_cache[$p] = $f;
+    }
+    return $f;
 }
 
 function store_get_path($uri) {
@@ -147,11 +184,18 @@ function h_post_about() {
 function h_get_store() {
     global $uri;
     $p = store_get_path($uri);
-    if(is_readable($p)) {
-        header('Content-Type: '.store_get_type($p));
-        print file_get_contents($p);
+    if(file_load($p)) {
+        if(req_header('if-none-match') === etag_file($p)) {
+            header('HTTP/1.1 304 Not Modified');
+        } else {
+            header('Content-Type: '.store_get_type($p));
+            $c = file_load($p);
+            header('Etag: '.etag($c));
+            print $c;
+        }
     } else {
         header('HTTP/1.1 404 Not Found');
+        header('Content-Type: text/plain');
         print "That resource does not exist or is unavailable.\n";
     }
 }
@@ -165,19 +209,57 @@ function h_put_store() {
     $p = join('/', $ptok).'/';
     $b = file_get_contents("php://input");
     if(is_writable($p)) {
-        if(@file_put_contents($p.$fn, $b)) {
-            header('HTTP/1.1 201 Created');
-            header('Location: '.HTTPBASE.$uri);
-            print "$uri\n";
+        if(req_header('if-match') && is_readable($p.$fn)) {
+            if(req_header('if-match') !== etag_file($p.fn)) {
+                header('HTTP/1.1 412 Precondition Failed');
+                header('Content-Type: text/plain');
+                print "Entity tag mismatch.\n";
+            }
         } else {
-            header('HTTP/1.1 500 Internal Server Error');
-            print "Could not save.\n";
+            if(@file_put_contents($p.$fn, $b)) {
+                global $global_file_cache;
+                if(isset($global_file_cache[$p.$fn])) {
+                    unset($global_file_cache[$p.$fn]);
+                }
+                header('HTTP/1.1 201 Created');
+                header('Etag: '.etag_file($p.$fn));
+                header('Content-Type: text/plain');
+                print rtrim($uri, '/')."\n";
+            } else {
+                header('HTTP/1.1 500 Internal Server Error');
+                header('Content-Type: text/plain');
+                print "Could not save.\n";
+            }
         }
     } else {
         header('HTTP/1.1 403 Forbidden');
         print "Resource is immutable.\n";
     }
     return true;
+}
+
+function h_delete_store() {
+    if(!auth_is('admin')) auth_challenge();
+    global $uri;
+    $p = store_get_path($uri);
+    if(file_load($p) && is_writable($p)) {
+        if(req_header('if-match')) {
+            if(req_header('if-match') !== etag_file($p)) {
+                header('HTTP/1.1 412 Precondition Failed');
+                header('Content-Type: text/plain');
+                print "Entity tag mismatch.\n";
+                return;
+            }
+        }
+        unlink($p);
+        header('HTTP/1.1 200 OK');
+        header('Content-Type: text/plain');
+        print "Deleted.\n";
+    } else {
+        header('HTTP/1.1 404 Not Found');
+        header('Content-Type: text/plain');
+        print "File not found.\n";
+    }
 }
 
 ob_start();
@@ -187,6 +269,7 @@ $hdrs = array();
 
 if(!valid_http_method($method)) {
     header('HTTP/1.1 501 Method Not Implemented');
+    header('Content-Type: text/plain');
     exit;
 }
 
@@ -194,9 +277,10 @@ if(($h = valid_uri($uri)) && handler_exists($h, $method)) {
     call_handler($h, $method);
 } elseif(($h = valid_uri($uri))) {
     header('HTTP/1.1 405 Method Not Allowed');
-    header('Allowed: '.join(handler_available_methods($h)));
+    header('Allowed: '.join(', ', handler_available_methods($h)));
 } else {
     header('HTTP/1.1 404 Not Found');
+    header('Content-Type: text/plain');
     print "That resource does not exist or is unavailable.\n";
 }
 $body = ob_get_contents();
