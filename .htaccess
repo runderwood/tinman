@@ -1,0 +1,7 @@
+#AddType application/x-httpd-php .php3 .phtml .php .php4 .php5 .html .html .xml
+Options -Indexes
+Options +FollowSymLinks
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ tm.php/$1 [L,QSA]
