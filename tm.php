@@ -1,8 +1,11 @@
 <?php
 define('CLI', isset($argv));
 if(CLI && !isset($argv[1])) die("Usage: tm <uri> [<method>] <- [<payload>]\n");
-define('HTTPBASE', '/r/tm/');
-define('STORE', '/home/reed/temp/tinmanstore/');
+define('HTTPBASE', '/tm/');
+define('DATADIR', '/home/reed/temp/tmdata/');
+define('USERDIR', DATADIR.'users/');
+define('UFILE', '.u.json');
+define('STORE', DATADIR.'store/');
 define('HPRE', 'h_');
 define('AUTHREALM', 'tinman');
 $global_file_cache = array(); // per-request file contents cache.
@@ -35,24 +38,37 @@ function auth_is($r) {
     return $is;
 }
 
+function auth_valid_username($un) {
+    return preg_match('/^\w{4,24}$/', $un);
+}
+
+function auth_ufile_load($un) {
+    $subdir = substr($un, 0, 2).'/';
+    $p = USERDIR.$subdir.UFILE;
+    $fc = file_load($p);
+    return @json_decode($fc);
+}
+
 function auth_user_exists($un) {
-    global $users;
-    return array_key_exists($un, $users);
+    return auth_ufile_load($un);
 }
 
 function auth_test_pw($un, $pw) {
-    global $users;
-    return md5($pw.$users[$un]['salt']) == $users[$un]['password'];
+    if(!auth_valid_username($un)) return false;
+    if(!($user = file_load($un))) return false;
+    if(!isset($user['salt'], $user['password'])) return false;
+    return md5($pw.$user['salt']) == $user['password'];
 }
 
 function auth_user() {
-    global $users, $routes;
     $user = false;
     if(isset($_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW'])) {
         $un = $_SERVER['PHP_AUTH_USER'];
         $pw = $_SERVER['PHP_AUTH_PW'];
         if(auth_user_exists($un) && auth_test_pw($un, $pw)){
-            $user = $users[$un];
+            $user = auth_user_exists($un);
+        } else {
+            $user = false;
         }
     }
     return $user;
@@ -282,6 +298,7 @@ if(($h = valid_uri($uri)) && handler_exists($h, $method)) {
     header('HTTP/1.1 404 Not Found');
     header('Content-Type: text/plain');
     print "That resource does not exist or is unavailable.\n";
+    print "$uri\n";
 }
 $body = ob_get_contents();
 ob_end_clean();
