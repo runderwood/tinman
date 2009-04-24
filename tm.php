@@ -32,7 +32,7 @@ function auth_challenge() {
 function auth_is($r) {
     global $user;
     $is = false;
-    if($user && isset($user['roles']) && in_array($r, $user['roles'])) {
+    if($user && isset($user->roles) && in_array($r, $user->roles)) {
         $is = true;
     }
     return $is;
@@ -44,9 +44,10 @@ function auth_valid_username($un) {
 
 function auth_ufile_load($un) {
     $subdir = substr($un, 0, 2).'/';
+    $subdir .= $un.'/';
     $p = USERDIR.$subdir.UFILE;
     $fc = file_load($p);
-    return @json_decode($fc);
+    return json_decode($fc);
 }
 
 function auth_user_exists($un) {
@@ -55,9 +56,9 @@ function auth_user_exists($un) {
 
 function auth_test_pw($un, $pw) {
     if(!auth_valid_username($un)) return false;
-    if(!($user = file_load($un))) return false;
-    if(!isset($user['salt'], $user['password'])) return false;
-    return md5($pw.$user['salt']) == $user['password'];
+    if(!($user = auth_ufile_load($un))) return false;
+    if(!isset($user->salt, $user->password)) return false;
+    return md5($pw.$user->salt) == $user->password;
 }
 
 function auth_user() {
@@ -232,7 +233,7 @@ function h_put_store() {
                 print "Entity tag mismatch.\n";
             }
         } else {
-            if(@file_put_contents($p.$fn, $b)) {
+            if(@file_put_contents($p.$fn, $b, LOCK_EX) !== false) {
                 global $global_file_cache;
                 if(isset($global_file_cache[$p.$fn])) {
                     unset($global_file_cache[$p.$fn]);
